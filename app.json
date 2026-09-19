@@ -1,0 +1,19 @@
+{
+  "expo": {
+    "name": "118",
+    "slug": "118-voice-app",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": false,
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "برای ضبط پیام صوتی درخواستت به میکروفون نیاز داریم.",
+        "NSLocationWhenInUseUsageDescription": "برای پیدا کردن نزدیک‌ترین کسب‌وکارها به موقعیت مکانی‌ات نیاز داریم."
+      }
+    },
+    "android": {
+      "permissions": ["RECORD_AUDIO", "ACCESS_FINE_LOCATION", "ACCESS_COARSE_LOCATION"]
+    }
+  }
+}
