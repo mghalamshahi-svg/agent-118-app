@@ -229,6 +229,29 @@ export default function App() {
     setScreen('detail');
   }
 
+  // --- Tap-to-call / tap-for-directions on the detail screen ------------
+  function callPhone() {
+    if (!selectedBusiness?.phone) {
+      return fail('شماره تماسی برای این کسب‌وکار ثبت نشده.');
+    }
+    Linking.openURL(`tel:${selectedBusiness.phone}`);
+  }
+
+  function openDirections() {
+    if (!selectedBusiness) return;
+    const { lat, lng, address_text } = selectedBusiness;
+    const url =
+      lat && lng
+        ? `https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}`
+        : address_text
+        ? `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(address_text)}`
+        : null;
+    if (!url) {
+      return fail('آدرسی برای این کسب‌وکار ثبت نشده.');
+    }
+    Linking.openURL(url);
+  }
+
   async function chooseChannel(channel) {
     try {
       const res = await fetch(`${API_BASE}/leads`, {
@@ -391,6 +414,16 @@ export default function App() {
             {selectedBusiness.languages ? (
               <Text style={styles.cardMeta}>🗣 زبان‌ها: {selectedBusiness.languages.join(', ')}</Text>
             ) : null}
+            {selectedBusiness.phone ? (
+              <TouchableOpacity onPress={callPhone} activeOpacity={0.7}>
+                <Text style={[styles.cardMeta, styles.tapLink]}>📞 {selectedBusiness.phone} (لمس کن برای تماس)</Text>
+              </TouchableOpacity>
+            ) : null}
+            {selectedBusiness.address_text ? (
+              <TouchableOpacity onPress={openDirections} activeOpacity={0.7}>
+                <Text style={[styles.cardMeta, styles.tapLink]}>🗺 {selectedBusiness.address_text} (لمس کن برای مسیریابی)</Text>
+              </TouchableOpacity>
+            ) : null}
             <Text style={styles.sectionLabel}>چطور باهاش در ارتباط باشی؟</Text>
           </ScrollView>
           <View style={styles.channelRow}>
@@ -511,6 +544,7 @@ const styles = StyleSheet.create({
   cardSubtitle: { fontSize: 13, color: '#5B6B7C', marginTop: 2 },
   cardRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 10 },
   cardMeta: { fontSize: 13, color: '#5B6B7C', marginTop: 6 },
+  tapLink: { color: '#1E5B8C', textDecorationLine: 'underline', fontWeight: '600' },
   sectionLabel: { fontSize: 15, fontWeight: '600', color: '#12314F', marginTop: 20, marginBottom: 8 },
   channelRow: { flexDirection: 'row', justifyContent: 'space-around', paddingHorizontal: 20, gap: 10 },
   successEmoji: { fontSize: 56, marginBottom: 8 },
@@ -521,9 +555,4 @@ const styles = StyleSheet.create({
     backgroundColor: '#FDECEA',
     borderRadius: 10,
     borderWidth: 1,
-    borderColor: '#F5C6C0',
-    padding: 12,
-  },
-  errorBoxTitle: { fontSize: 12, fontWeight: '700', color: '#8A2E24', marginBottom: 6 },
-  errorBoxText: { fontSize: 12, color: '#8A2E24' },
-});
+    borderColor:
