@@ -19,20 +19,9 @@ import {
 } from 'expo-audio';
 import * as Location from 'expo-location';
 
-// -----------------------------------------------------------------------
-// CONFIG — the only line you should ever need to change.
-// This is the live matching-engine deployed on the GlobalLink VPS
-// (systemd service "globallink-matching-engine", port 3300).
-// -----------------------------------------------------------------------
 const API_BASE = 'http://137.184.169.205:3300';
-
-// Thornhill / GlobalLink office — used if the user doesn't grant location
-// permission, so the demo still works.
 const FALLBACK_LOCATION = { lat: 43.8161, lng: -79.4633 };
 
-// -----------------------------------------------------------------------
-// Small shared UI pieces
-// -----------------------------------------------------------------------
 function PrimaryButton({ title, onPress, disabled, style }) {
   return (
     <TouchableOpacity
@@ -72,17 +61,11 @@ function LoadingScreen({ label }) {
   );
 }
 
-// -----------------------------------------------------------------------
-// App — a single state machine walks through the whole voice-lead flow:
-// record -> transcribing -> confirm -> matching -> results -> detail
-// -> (emailPreview) -> sent
-// -----------------------------------------------------------------------
 export default function App() {
   const [screen, setScreen] = useState('record');
-  // 'idle' -> 'preparing' -> 'recording' -> (back to 'idle' once stopped)
   const [recordingState, setRecordingState] = useState('idle');
   const [transcript, setTranscript] = useState('');
-  const [intent, setIntent] = useState(null); // { category_id, summary, language_requested, urgency }
+  const [intent, setIntent] = useState(null);
   const [businesses, setBusinesses] = useState([]);
   const [selectedBusiness, setSelectedBusiness] = useState(null);
   const [emailDraft, setEmailDraft] = useState('');
@@ -91,15 +74,6 @@ export default function App() {
 
   const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
 
-  // Ask for the microphone permission as soon as the app opens, instead of
-  // mid-gesture. On a first-ever launch, the OS permission dialog steals
-  // the touch that was holding a record button down, which used to cause
-  // "Cannot start an audio recording without initializing a
-  // MediaRecorder" — the stop handler ran before setup had finished.
-  // Getting permission out of the way early avoids that entirely, and the
-  // record button now also uses a simple tap-to-start / tap-to-stop
-  // interaction instead of press-and-hold, which removes the timing race
-  // altogether regardless of when permission is granted.
   useEffect(() => {
     requestRecordingPermissionsAsync().catch(() => {});
   }, []);
@@ -111,8 +85,6 @@ export default function App() {
     Alert.alert('یه مشکلی پیش اومد', message + detail, [{ text: 'باشه' }]);
   }
 
-  // Reads the response body (JSON or text) so real server errors show up
-  // in the alert instead of a generic "failed" message.
   async function describeBadResponse(res) {
     let bodyText = '';
     try {
@@ -123,14 +95,6 @@ export default function App() {
     return `HTTP ${res.status} — ${bodyText}`.slice(0, 500);
   }
 
-  // Uploads the recorded file with the platform's native XMLHttpRequest
-  // instead of fetch(). As of Expo SDK 54, the global fetch (backed by
-  // Expo's own WinterCG-compliant implementation) no longer accepts the
-  // classic {uri, name, type} object for a FormData file part and throws
-  // "Unsupported FormData part implementation". The native XHR bridge
-  // (what fetch itself is built on for older-style requests) still
-  // accepts that shape, so we use it directly for this one upload and
-  // avoid needing any extra file-system package just for this.
   function uploadRecording(uri) {
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
@@ -153,9 +117,6 @@ export default function App() {
             'Request timed out after 60s — the Render free-tier service may still be waking up from being idle. Try again in a few seconds.'
           )
         );
-      // Render's free tier can take up to ~50s to wake up from idle, so
-      // give this a generous timeout instead of hanging forever or the
-      // OS silently killing an idle connection.
       xhr.timeout = 60000;
       const formData = new FormData();
       formData.append('audio', { uri, name: 'recording.m4a', type: 'audio/m4a' });
@@ -163,14 +124,9 @@ export default function App() {
     });
   }
 
-  // --- 1. Recording -------------------------------------------------
-  // A single tap starts recording; a second tap stops it and starts the
-  // transcription. Using explicit taps (not press-and-hold) means there is
-  // no timing race between "recording setup finished" and "user let go".
   async function handleMicPress() {
     if (recordingState === 'idle') return startRecording();
     if (recordingState === 'recording') return stopRecordingAndTranscribe();
-    // 'preparing' -> ignore extra taps until setup finishes.
   }
 
   async function startRecording() {
@@ -210,7 +166,6 @@ export default function App() {
     }
   }
 
-  // --- 2. Confirm transcript -> extract intent -----------------------
   async function confirmAndExtractIntent() {
     if (!transcript.trim()) {
       return fail('اول باید یک پیام صوتی ضبط کنی یا متن رو بنویسی.');
@@ -232,19 +187,22 @@ export default function App() {
     }
   }
 
-  // --- 3. Match businesses --------------------------------------------
   async function runMatch(intentData) {
     try {
       setScreen('matching');
       let coords = FALLBACK_LOCATION;
-      try {
-        const { status } = await Location.requestForegroundPermissionsAsync();
-        if (status === 'granted') {
-          const loc = await Location.getCurrentPositionAsync({});
-          coords = { lat: loc.coords.latitude, lng: loc.coords.longitude };
+      if (intentData.location_lat != null && intentData.location_lng != null) {
+        coords = { lat: intentData.location_lat, lng: intentData.location_lng };
+      } else {
+        try {
+          const { status } = await Location.requestForegroundPermissionsAsync();
+          if (status === 'granted') {
+            const loc = await Location.getCurrentPositionAsync({});
+            coords = { lat: loc.coords.latitude, lng: loc.coords.longitude };
+          }
+        } catch (locErr) {
+          console.log('location unavailable, using fallback', locErr);
         }
-      } catch (locErr) {
-        console.log('location unavailable, using fallback', locErr);
       }
 
       const params = new URLSearchParams({
@@ -266,13 +224,11 @@ export default function App() {
     }
   }
 
-  // --- 4. Pick a business -> detail ------------------------------------
   function pickBusiness(biz) {
     setSelectedBusiness(biz);
     setScreen('detail');
   }
 
-  // --- 5. Create the lead for a chosen channel -------------------------
   async function chooseChannel(channel) {
     try {
       const res = await fetch(`${API_BASE}/leads`, {
@@ -328,9 +284,6 @@ export default function App() {
     setErrorMsg('');
   }
 
-  // ---------------------------------------------------------------------
-  // Render
-  // ---------------------------------------------------------------------
   return (
     <SafeAreaView style={styles.safe}>
       {screen === 'record' && (
@@ -480,9 +433,6 @@ export default function App() {
   );
 }
 
-// -----------------------------------------------------------------------
-// Styles
-// -----------------------------------------------------------------------
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: '#F7F9FC' },
   fill: { flex: 1 },
