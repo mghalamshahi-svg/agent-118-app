@@ -79,6 +79,18 @@ export default function App() {
     requestRecordingPermissionsAsync().catch(() => {});
   }, []);
 
+  // TEMP DIAGNOSTIC: log which Persian ("fa") voices, if any, this device
+  // has installed for text-to-speech. Remove once we've confirmed the fix.
+  useEffect(() => {
+    Speech.getAvailableVoicesAsync()
+      .then((voices) => {
+        const farsiVoices = voices.filter((v) => (v.language || '').toLowerCase().startsWith('fa'));
+        console.log('TOTAL VOICES ON DEVICE:', voices.length);
+        console.log('FARSI VOICES FOUND:', JSON.stringify(farsiVoices));
+      })
+      .catch((err) => console.log('getAvailableVoicesAsync error', err));
+  }, []);
+
   // As soon as the detail screen opens for a business, ask out loud whether
   // the customer wants the route, and listen for a spoken بله/نه answer —
   // this is on top of (not instead of) the tap-to-call / tap-for-directions
