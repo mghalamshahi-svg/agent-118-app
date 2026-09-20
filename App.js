@@ -311,6 +311,11 @@ export default function App() {
       const perm = await requestRecordingPermissionsAsync();
       if (!perm.granted) return;
       await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
+      // Give iOS a moment to actually finish switching the audio session from
+      // "playback" (the TTS question we just spoke) to "recording" before we
+      // start capturing — starting too soon produces a corrupted/empty audio
+      // file that Whisper then rejects as "could not be decoded".
+      await new Promise((resolve) => setTimeout(resolve, 400));
       await audioRecorder.prepareToRecordAsync();
       await audioRecorder.record();
       // Short fixed listening window — no manual tap needed for this yes/no turn.
