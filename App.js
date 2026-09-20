@@ -18,6 +18,7 @@ import {
   setAudioModeAsync,
 } from 'expo-audio';
 import * as Location from 'expo-location';
+import * as Speech from 'expo-speech';
 
 const API_BASE = 'http://137.184.169.205:3300';
 const FALLBACK_LOCATION = { lat: 43.8161, lng: -79.4633 };
@@ -77,6 +78,17 @@ export default function App() {
   useEffect(() => {
     requestRecordingPermissionsAsync().catch(() => {});
   }, []);
+
+  // As soon as the detail screen opens for a business, ask out loud whether
+  // the customer wants the route, and listen for a spoken بله/نه answer —
+  // this is on top of (not instead of) the tap-to-call / tap-for-directions
+  // lines above, which still work as a manual fallback.
+  useEffect(() => {
+    if (screen === 'detail' && selectedBusiness) {
+      askForDirections();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [screen, selectedBusiness]);
 
   function fail(message, err) {
     console.log('ERROR:', message, err);
@@ -252,6 +264,77 @@ export default function App() {
     Linking.openURL(url);
   }
 
+  // --- Voice yes/no follow-up: "می‌خوای مسیر رو روی نقشه برات باز کنم؟" ---
+  // NOTE: on iOS, if the audio session is still in "recording" mode (left
+  // over from the push-to-talk button) when we try to play TTS, the speaker
+  // output comes out distorted/garbled (routed through the tiny earpiece
+  // instead of the main speaker). So we explicitly switch to playback mode
+  // right before speaking, then switch back to recording mode right before
+  // listening for the yes/no answer.
+  async function speak(text) {
+    try {
+      await setAudioModeAsync({ allowsRecording: false, playsInSilentMode: true });
+    } catch (err) {
+      console.log('setAudioModeAsync (playback) error', err);
+    }
+    return new Promise((resolve) => {
+      Speech.speak(text, {
+        language: 'fa-IR',
+        onDone: resolve,
+        onStopped: resolve,
+        onError: resolve,
+      });
+    });
+  }
+
+  function isAffirmative(text) {
+    return /بله|بعله|آره|اره|باشه|حتما|حتماً|okay|^ok$|^yes$/i.test((text || '').trim());
+  }
+
+  function isNegative(text) {
+    return /نه\b|نه‌?ممنون|نمی‌?خوام|نمیخوام|^no$/i.test((text || '').trim());
+  }
+
+  async function askForDirections() {
+    const hasRoute = selectedBusiness?.lat && selectedBusiness?.lng;
+    if (!hasRoute) return; // nothing to navigate to — skip the voice prompt entirely
+    try {
+      await speak('می‌خوای مسیر رو روی نقشه برات باز کنم؟ بگو بله یا نه.');
+      await listenForYesNo();
+    } catch (err) {
+      console.log('askForDirections error', err);
+    }
+  }
+
+  async function listenForYesNo() {
+    try {
+      const perm = await requestRecordingPermissionsAsync();
+      if (!perm.granted) return;
+      await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
+      await audioRecorder.prepareToRecordAsync();
+      await audioRecorder.record();
+      // Short fixed listening window — no manual tap needed for this yes/no turn.
+      await new Promise((resolve) => setTimeout(resolve, 3500));
+      await audioRecorder.stop();
+      const uri = audioRecorder.uri;
+      if (!uri) return;
+
+      const data = await uploadRecording(uri);
+      const answer = data.text || '';
+
+      if (isAffirmative(answer)) {
+        openDirections();
+      } else if (isNegative(answer)) {
+        await speak('باشه، حالا چطور می‌تونم کمکت کنم؟');
+        startOver();
+      }
+      // Unclear answer: say nothing more — the tap-to-call / tap-for-directions
+      // lines on this screen still work as a manual fallback.
+    } catch (err) {
+      console.log('listenForYesNo error', err);
+    }
+  }
+
   async function chooseChannel(channel) {
     try {
       const res = await fetch(`${API_BASE}/leads`, {
@@ -419,9 +502,11 @@ export default function App() {
                 <Text style={[styles.cardMeta, styles.tapLink]}>📞 {selectedBusiness.phone} (لمس کن برای تماس)</Text>
               </TouchableOpacity>
             ) : null}
-            {selectedBusiness.address_text ? (
+            {(selectedBusiness.address_text || (selectedBusiness.lat && selectedBusiness.lng)) ? (
               <TouchableOpacity onPress={openDirections} activeOpacity={0.7}>
-                <Text style={[styles.cardMeta, styles.tapLink]}>🗺 {selectedBusiness.address_text} (لمس کن برای مسیریابی)</Text>
+                <Text style={[styles.cardMeta, styles.tapLink]}>
+                  🗺 {selectedBusiness.address_text || 'مسیریابی روی نقشه'} (لمس کن برای مسیریابی)
+                </Text>
               </TouchableOpacity>
             ) : null}
             <Text style={styles.sectionLabel}>چطور باهاش در ارتباط باشی؟</Text>
@@ -555,4 +640,9 @@ const styles = StyleSheet.create({
     backgroundColor: '#FDECEA',
     borderRadius: 10,
     borderWidth: 1,
-    borderColor:
+    borderColor: '#F5C6C0',
+    padding: 12,
+  },
+  errorBoxTitle: { fontSize: 12, fontWeight: '700', color: '#8A2E24', marginBottom: 6 },
+  errorBoxText: { fontSize: 12, color: '#8A2E24' },
+});
