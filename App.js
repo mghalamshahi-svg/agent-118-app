@@ -16,9 +16,9 @@ import {
   RecordingPresets,
   requestRecordingPermissionsAsync,
   setAudioModeAsync,
+  createAudioPlayer,
 } from 'expo-audio';
 import * as Location from 'expo-location';
-import * as Speech from 'expo-speech';
 
 const API_BASE = 'http://137.184.169.205:3300';
 const FALLBACK_LOCATION = { lat: 43.8161, lng: -79.4633 };
@@ -40,6 +40,16 @@ function SecondaryButton({ title, onPress, style }) {
   return (
     <TouchableOpacity style={[styles.secondaryButton, style]} onPress={onPress} activeOpacity={0.8}>
       <Text style={styles.secondaryButtonText}>{title}</Text>
+    </TouchableOpacity>
+  );
+}
+
+function InfoButton({ icon, label, onPress }) {
+  return (
+    <TouchableOpacity style={styles.infoButton} onPress={onPress} activeOpacity={0.75}>
+      <Text style={styles.infoButtonText}>
+        {icon} {label}
+      </Text>
     </TouchableOpacity>
   );
 }
@@ -79,25 +89,14 @@ export default function App() {
     requestRecordingPermissionsAsync().catch(() => {});
   }, []);
 
-  // TEMP DIAGNOSTIC: log which Persian ("fa") voices, if any, this device
-  // has installed for text-to-speech. Remove once we've confirmed the fix.
-  useEffect(() => {
-    Speech.getAvailableVoicesAsync()
-      .then((voices) => {
-        const farsiVoices = voices.filter((v) => (v.language || '').toLowerCase().startsWith('fa'));
-        console.log('TOTAL VOICES ON DEVICE:', voices.length);
-        console.log('FARSI VOICES FOUND:', JSON.stringify(farsiVoices));
-      })
-      .catch((err) => console.log('getAvailableVoicesAsync error', err));
-  }, []);
-
-  // As soon as the detail screen opens for a business, ask out loud whether
-  // the customer wants the route, and listen for a spoken بله/نه answer —
-  // this is on top of (not instead of) the tap-to-call / tap-for-directions
-  // lines above, which still work as a manual fallback.
+  // As soon as the detail screen opens for a business, run the voice
+  // introduction (name -> "know more?" -> contact info -> directions ->
+  // open follow-up) — this is on top of (not instead of) the tap-to-call /
+  // tap-for-directions / contact buttons below, which still work as a
+  // manual fallback.
   useEffect(() => {
     if (screen === 'detail' && selectedBusiness) {
-      askForDirections();
+      introduceBusiness();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [screen, selectedBusiness]);
@@ -277,9 +276,16 @@ export default function App() {
   }
 
   // --- Voice yes/no follow-up: "می‌خوای مسیر رو روی نقشه برات باز کنم؟" ---
-  // NOTE: on iOS, if the audio session is still in "recording" mode (left
-  // over from the push-to-talk button) when we try to play TTS, the speaker
-  // output comes out distorted/garbled (routed through the tiny earpiece
+  // We tried the phone's own built-in text-to-speech (expo-speech) first,
+  // but most phones have no Persian voice installed, so it just produced a
+  // tiny garbled blip instead of real speech. Fix: generate the audio on
+  // our own server (OpenAI TTS, via the matching-engine's /speak endpoint)
+  // and stream that MP3 back to play — this doesn't depend on anything
+  // being installed on the customer's phone.
+  //
+  // Also: on iOS, if the audio session is still in "recording" mode (left
+  // over from the push-to-talk button) when we try to play audio, the
+  // speaker output comes out distorted (routed through the tiny earpiece
   // instead of the main speaker). So we explicitly switch to playback mode
   // right before speaking, then switch back to recording mode right before
   // listening for the yes/no answer.
@@ -290,12 +296,29 @@ export default function App() {
       console.log('setAudioModeAsync (playback) error', err);
     }
     return new Promise((resolve) => {
-      Speech.speak(text, {
-        language: 'fa-IR',
-        onDone: resolve,
-        onStopped: resolve,
-        onError: resolve,
-      });
+      let finished = false;
+      const finish = () => {
+        if (finished) return;
+        finished = true;
+        resolve();
+      };
+      try {
+        const player = createAudioPlayer(`${API_BASE}/speak?text=${encodeURIComponent(text)}`);
+        player.addListener('playbackStatusUpdate', (status) => {
+          if (status.didJustFinish) {
+            try {
+              player.remove();
+            } catch (e) {}
+            finish();
+          }
+        });
+        player.play();
+        // Safety net in case the finish event never fires (network hiccup, etc.)
+        setTimeout(finish, 15000);
+      } catch (err) {
+        console.log('speak (server TTS) error', err);
+        finish();
+      }
     });
   }
 
@@ -307,48 +330,143 @@ export default function App() {
     return /نه\b|نه‌?ممنون|نمی‌?خوام|نمیخوام|^no$/i.test((text || '').trim());
   }
 
-  async function askForDirections() {
-    const hasRoute = selectedBusiness?.lat && selectedBusiness?.lng;
-    if (!hasRoute) return; // nothing to navigate to — skip the voice prompt entirely
+  // Whisper sometimes mishears a very short بله/نه, or — when there was
+  // actually silence — "hallucinates" a stock English phrase from its
+  // training data (e.g. "please subscribe", "share this video..."). Since
+  // this app only expects Persian speech, requiring at least one Persian/
+  // Arabic-script character is a cheap, effective way to reject that kind
+  // of noise instead of treating it as a real request.
+  function looksLikePersianSpeech(text) {
+    return /[؀-ۿ]/.test(text || '');
+  }
+
+  // Records for `windowMs` milliseconds and returns whatever Whisper
+  // transcribed (empty string on any failure). Shared by the yes/no prompts
+  // and the open-ended follow-up listener below, so there's one place that
+  // handles the iOS "switch from playback to recording" timing.
+  async function captureSpeech(windowMs) {
     try {
-      await speak('می‌خوای مسیر رو روی نقشه برات باز کنم؟ بگو بله یا نه.');
-      await listenForYesNo();
+      const perm = await requestRecordingPermissionsAsync();
+      if (!perm.granted) {
+        console.log('CAPTURE: mic permission NOT granted');
+        return '';
+      }
+      await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
+      // Give iOS a moment to actually finish switching the audio session from
+      // "playback" (whatever we just spoke) to "recording" before we start
+      // capturing — starting too soon produces a corrupted/empty audio file
+      // that Whisper then rejects as "could not be decoded". Trimmed from
+      // 400ms to 300ms to shave a bit of perceived lag off every turn.
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await audioRecorder.prepareToRecordAsync();
+      await audioRecorder.record();
+      await new Promise((resolve) => setTimeout(resolve, windowMs));
+      await audioRecorder.stop();
+      const uri = audioRecorder.uri;
+      if (!uri) return '';
+      const data = await uploadRecording(uri);
+      return data.text || '';
     } catch (err) {
-      console.log('askForDirections error', err);
+      console.log('captureSpeech error', err);
+      return '';
     }
   }
 
-  async function listenForYesNo() {
+  // Listens for a short بله/نه answer and returns 'yes' | 'no' | 'unclear'.
+  // 2800ms is plenty for a one-or-two-word بله/نه answer and keeps the
+  // back-and-forth feeling snappier than the previous 3500ms.
+  async function listenYesNo() {
+    console.log('YESNO: listening...');
+    const answer = await captureSpeech(2800);
+    console.log('YESNO TRANSCRIBED ANSWER:', JSON.stringify(answer));
+    console.log('YESNO isAffirmative:', isAffirmative(answer), 'isNegative:', isNegative(answer));
+    if (isAffirmative(answer)) return 'yes';
+    if (isNegative(answer)) return 'no';
+    return 'unclear';
+  }
+
+  // Builds a short spoken summary out of whatever fields this business
+  // actually has (brokerage/company, languages, phone, address) so the
+  // "know more" answer gives real information instead of just "check the
+  // screen". If a field (like a real portfolio link) isn't in the data
+  // yet, it's simply skipped here — nothing to read a website/portfolio
+  // out loud until the backend actually sends one.
+  function buildBusinessSummary(biz) {
+    const parts = [];
+    if (biz.brokerage_or_company) parts.push(`از ${biz.brokerage_or_company}`);
+    if (biz.languages && biz.languages.length) {
+      parts.push(`به زبان‌های ${biz.languages.join('، ')} صحبت می‌کنه`);
+    }
+    if (biz.phone) parts.push(`شماره تماسش ${biz.phone} هست`);
+    if (biz.address_text) parts.push(`آدرسش ${biz.address_text} هست`);
+    return parts.join('، ');
+  }
+
+  // As soon as the detail screen opens for a business, this runs the full
+  // voice introduction:
+  //   1) say the business's full name out loud
+  //   2) ask "می‌خوای بیشتر در مورد <name> بدونی؟" and listen for بله/نه
+  //   3) if بله: say the contact/website/portfolio info is shown below,
+  //      then (if this business has a map location) ask about directions too
+  //   4) finish with "من اینجا هستم..." and open a short window for the
+  //      customer to immediately ask something new by voice — e.g. asking
+  //      to be introduced to a different person — without tapping anything.
+  // The tap-to-call / tap-for-directions / contact buttons on this screen
+  // always keep working as a manual fallback no matter what happens here.
+  async function introduceBusiness() {
+    if (!selectedBusiness) return;
+    const name = selectedBusiness.name;
+    const hasRoute = selectedBusiness?.lat && selectedBusiness?.lng;
     try {
-      const perm = await requestRecordingPermissionsAsync();
-      if (!perm.granted) return;
-      await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
-      // Give iOS a moment to actually finish switching the audio session from
-      // "playback" (the TTS question we just spoke) to "recording" before we
-      // start capturing — starting too soon produces a corrupted/empty audio
-      // file that Whisper then rejects as "could not be decoded".
-      await new Promise((resolve) => setTimeout(resolve, 400));
-      await audioRecorder.prepareToRecordAsync();
-      await audioRecorder.record();
-      // Short fixed listening window — no manual tap needed for this yes/no turn.
-      await new Promise((resolve) => setTimeout(resolve, 3500));
-      await audioRecorder.stop();
-      const uri = audioRecorder.uri;
-      if (!uri) return;
+      console.log('INTRO: introducing', name);
+      // One combined sentence instead of two separate TTS calls — cuts a
+      // full network round-trip (and its playback-start delay) out of
+      // every single business introduction.
+      await speak(`${name} رو پیدا کردم. می‌خوای بیشتر در موردش بدونی؟ بگو بله یا نه.`);
+      const wantsMore = await listenYesNo();
+      console.log('INTRO wantsMore:', wantsMore);
 
-      const data = await uploadRecording(uri);
-      const answer = data.text || '';
-
-      if (isAffirmative(answer)) {
-        openDirections();
-      } else if (isNegative(answer)) {
-        await speak('باشه، حالا چطور می‌تونم کمکت کنم؟');
-        startOver();
+      if (wantsMore === 'yes') {
+        const summary = buildBusinessSummary(selectedBusiness);
+        const extra = hasRoute
+          ? ' می‌خوای مسیر رو هم روی نقشه برات باز کنم؟ بگو بله یا نه.'
+          : ' اگه سوال دیگه‌ای داشتی بگو.';
+        const infoText = summary
+          ? `${summary}.`
+          : 'اطلاعات تماسش رو هم اینجا روی صفحه برات گذاشتم.';
+        await speak(`باشه، ${infoText}${extra}`);
+        if (hasRoute) {
+          const wantsDirections = await listenYesNo();
+          console.log('INTRO wantsDirections:', wantsDirections);
+          if (wantsDirections === 'yes') {
+            openDirections();
+          }
+          await speak('باشه، اگه سوال دیگه‌ای داشتی بگو.');
+        }
+      } else if (wantsMore === 'no') {
+        await speak('باشه، هر وقت خواستی دوباره صدام کن.');
       }
-      // Unclear answer: say nothing more — the tap-to-call / tap-for-directions
-      // lines on this screen still work as a manual fallback.
+
+      await listenForFollowUp();
     } catch (err) {
-      console.log('listenForYesNo error', err);
+      console.log('introduceBusiness error', err);
+    }
+  }
+
+  // Open-ended follow-up: give the customer a few seconds to ask something
+  // new by voice right here (e.g. "یکی دیگه رو هم نشونم بده"). Whatever gets
+  // transcribed is dropped into the normal confirm screen, exactly like
+  // tapping the big mic button on the home screen, so nothing about the
+  // rest of the app needs to change to support it.
+  async function listenForFollowUp() {
+    console.log('FOLLOWUP: listening for a new request...');
+    const text = await captureSpeech(4000);
+    console.log('FOLLOWUP TRANSCRIBED:', JSON.stringify(text));
+    if (text && text.trim() && looksLikePersianSpeech(text)) {
+      setTranscript(text);
+      setScreen('confirm');
+    } else if (text && text.trim()) {
+      console.log('FOLLOWUP: ignored — does not look like real Persian speech (likely silence or a mis-hearing)');
     }
   }
 
@@ -515,16 +633,28 @@ export default function App() {
               <Text style={styles.cardMeta}>🗣 زبان‌ها: {selectedBusiness.languages.join(', ')}</Text>
             ) : null}
             {selectedBusiness.phone ? (
-              <TouchableOpacity onPress={callPhone} activeOpacity={0.7}>
-                <Text style={[styles.cardMeta, styles.tapLink]}>📞 {selectedBusiness.phone} (لمس کن برای تماس)</Text>
-              </TouchableOpacity>
+              <InfoButton icon="📞" label={`تماس با ${selectedBusiness.phone}`} onPress={callPhone} />
             ) : null}
             {(selectedBusiness.address_text || (selectedBusiness.lat && selectedBusiness.lng)) ? (
-              <TouchableOpacity onPress={openDirections} activeOpacity={0.7}>
-                <Text style={[styles.cardMeta, styles.tapLink]}>
-                  🗺 {selectedBusiness.address_text || 'مسیریابی روی نقشه'} (لمس کن برای مسیریابی)
-                </Text>
-              </TouchableOpacity>
+              <InfoButton
+                icon="🗺"
+                label={
+                  selectedBusiness.address_text
+                    ? `مسیریابی به ${selectedBusiness.address_text}`
+                    : 'نمایش مسیر روی نقشه'
+                }
+                onPress={openDirections}
+              />
+            ) : null}
+            {selectedBusiness.website ? (
+              <InfoButton icon="🌐" label="مشاهده وب‌سایت" onPress={() => Linking.openURL(selectedBusiness.website)} />
+            ) : null}
+            {selectedBusiness.portfolio_url ? (
+              <InfoButton
+                icon="🖼"
+                label="مشاهده پورتفولیو"
+                onPress={() => Linking.openURL(selectedBusiness.portfolio_url)}
+              />
             ) : null}
             <Text style={styles.sectionLabel}>چطور باهاش در ارتباط باشی؟</Text>
           </ScrollView>
@@ -647,6 +777,17 @@ const styles = StyleSheet.create({
   cardRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 10 },
   cardMeta: { fontSize: 13, color: '#5B6B7C', marginTop: 6 },
   tapLink: { color: '#1E5B8C', textDecorationLine: 'underline', fontWeight: '600' },
+  infoButton: {
+    marginTop: 12,
+    backgroundColor: '#fff',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#1E5B8C',
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    alignItems: 'center',
+  },
+  infoButtonText: { color: '#1E5B8C', fontSize: 15, fontWeight: '700' },
   sectionLabel: { fontSize: 15, fontWeight: '600', color: '#12314F', marginTop: 20, marginBottom: 8 },
   channelRow: { flexDirection: 'row', justifyContent: 'space-around', paddingHorizontal: 20, gap: 10 },
   successEmoji: { fontSize: 56, marginBottom: 8 },
