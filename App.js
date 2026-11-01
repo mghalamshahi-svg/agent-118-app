@@ -22,6 +22,9 @@ import * as Location from 'expo-location';
 
 const API_BASE = 'http://137.184.169.205:3300';
 const FALLBACK_LOCATION = { lat: 43.8161, lng: -79.4633 };
+// Masked-calling service (Twilio). Customer and business both only see the 118 number.
+const VOICE_API = 'http://137.184.169.205:3118';
+const MASKED_NUMBER_DISPLAY = '289-803-4877';
 
 function PrimaryButton({ title, onPress, disabled, style }) {
   return (
@@ -82,6 +85,9 @@ export default function App() {
   const [emailDraft, setEmailDraft] = useState('');
   const [leadId, setLeadId] = useState(null);
   const [errorMsg, setErrorMsg] = useState('');
+  const [customerPhone, setCustomerPhone] = useState('');
+  const [phoneDraft, setPhoneDraft] = useState('');
+  const [callBusy, setCallBusy] = useState(false);
 
   const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
 
@@ -257,7 +263,59 @@ export default function App() {
     if (!selectedBusiness?.phone) {
       return fail('شماره تماسی برای این کسب‌وکار ثبت نشده.');
     }
-    Linking.openURL(`tel:${selectedBusiness.phone}`);
+    startMaskedCall();
+  }
+
+  // --- Masked calling (Twilio via agent-118-voice) -----------------------
+  // The service rings the customer's phone first, then connects them to the
+  // business. Neither side sees the other's real number.
+  function normalizePhone(raw) {
+    const d = String(raw || '').replace(/\D/g, '');
+    if (d.length === 10) return '+1' + d;
+    if (d.length === 11 && d.startsWith('1')) return '+' + d;
+    return null;
+  }
+
+  function startMaskedCall(phoneOverride) {
+    const phone = phoneOverride || customerPhone;
+    if (!phone) {
+      setPhoneDraft('');
+      setScreen('askPhone');
+      return;
+    }
+    placeMaskedCall(phone);
+  }
+
+  async function placeMaskedCall(phone) {
+    if (!selectedBusiness?.phone) return fail('شماره تماسی برای این کسب‌وکار ثبت نشده.');
+    try {
+      setCallBusy(true);
+      const res = await fetch(`${VOICE_API}/api/connect`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          customerPhone: phone,
+          businessId: String(selectedBusiness.id),
+          businessPhone: selectedBusiness.phone,
+          businessName: selectedBusiness.name,
+        }),
+      });
+      if (!res.ok) throw new Error(await describeBadResponse(res));
+      setScreen('calling');
+    } catch (err) {
+      // Fallback: if the masked-call service is unreachable, call directly.
+      fail('اتصال تماس از طریق ۱۱۸ انجام نشد. مستقیم تماس می‌گیریم.', err);
+      Linking.openURL(`tel:${selectedBusiness.phone}`);
+    } finally {
+      setCallBusy(false);
+    }
+  }
+
+  function confirmPhoneAndCall() {
+    const p = normalizePhone(phoneDraft);
+    if (!p) return fail('شماره موبایل رو درست وارد کن (۱۰ رقم، مثلاً 4165551234).');
+    setCustomerPhone(p);
+    startMaskedCall(p);
   }
 
   function openDirections() {
@@ -490,8 +548,7 @@ export default function App() {
         setEmailDraft(data.email_draft || data.draft || '');
         setScreen('emailPreview');
       } else if (channel === 'call' && selectedBusiness.phone) {
-        Linking.openURL(`tel:${selectedBusiness.phone}`);
-        setScreen('sent');
+        startMaskedCall();
       } else {
         setScreen('sent');
       }
@@ -687,6 +744,48 @@ export default function App() {
         </View>
       )}
 
+      {screen === 'askPhone' && (
+        <View style={styles.fill}>
+          <ScreenHeader
+            title="شماره موبایلت چنده؟"
+            subtitle="۱۱۸ اول به گوشی خودت زنگ می‌زنه و بعد وصلت می‌کنه. شماره‌ات به کسب‌وکار نشون داده نمی‌شه."
+          />
+          <View style={styles.body}>
+            <TextInput
+              style={styles.phoneInput}
+              value={phoneDraft}
+              onChangeText={setPhoneDraft}
+              keyboardType="phone-pad"
+              placeholder="مثلاً 416 555 1234"
+              maxLength={16}
+              autoFocus
+            />
+          </View>
+          <View style={styles.footer}>
+            <SecondaryButton title="بازگشت" onPress={() => setScreen('detail')} />
+            <PrimaryButton
+              title={callBusy ? '... در حال اتصال' : '📞 تماس بگیر'}
+              onPress={confirmPhoneAndCall}
+              disabled={callBusy}
+            />
+          </View>
+        </View>
+      )}
+
+      {screen === 'calling' && (
+        <View style={styles.centerFill}>
+          <Text style={styles.successEmoji}>📲</Text>
+          <ScreenHeader
+            title="الان گوشیت زنگ می‌خوره"
+            subtitle={`از شماره ${MASKED_NUMBER_DISPLAY} (۱۱۸). جواب بده تا به ${selectedBusiness?.name || 'کسب‌وکار'} وصل بشی.`}
+          />
+          <Text style={styles.hint}>
+            اگه بعداً خواستی دوباره تماس بگیری، فقط به همین شماره زنگ بزن؛ مستقیم وصلت می‌کنیم.
+          </Text>
+          <PrimaryButton title="جستجوی جدید" onPress={startOver} style={{ marginTop: 24 }} />
+        </View>
+      )}
+
       {screen === 'sent' && (
         <View style={styles.centerFill}>
           <Text style={styles.successEmoji}>✅</Text>
@@ -791,6 +890,17 @@ const styles = StyleSheet.create({
   sectionLabel: { fontSize: 15, fontWeight: '600', color: '#12314F', marginTop: 20, marginBottom: 8 },
   channelRow: { flexDirection: 'row', justifyContent: 'space-around', paddingHorizontal: 20, gap: 10 },
   successEmoji: { fontSize: 56, marginBottom: 8 },
+  phoneInput: {
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    padding: 16,
+    fontSize: 20,
+    color: '#12314F',
+    borderWidth: 1,
+    borderColor: '#E1E7EE',
+    textAlign: 'center',
+    letterSpacing: 1,
+  },
   errorBox: {
     marginTop: 24,
     maxHeight: 220,
