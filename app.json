@@ -2,7 +2,7 @@
   "expo": {
     "name": "118",
     "slug": "118-voice-app",
-    "version": "0.1.0",
+    "version": "6.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
     "ios": {
@@ -13,7 +13,15 @@
       }
     },
     "android": {
-      "permissions": ["RECORD_AUDIO", "ACCESS_FINE_LOCATION", "ACCESS_COARSE_LOCATION"]
-    }
+      "permissions": [
+        "RECORD_AUDIO",
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION"
+      ]
+    },
+    "plugins": [
+      "expo-audio",
+      "expo-status-bar"
+    ]
   }
 }
