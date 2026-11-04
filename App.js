@@ -35,7 +35,7 @@ import * as Location from 'expo-location';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const API_BASE = 'http://137.184.169.205:3300';
-const APP_VERSION = 'v6'; // shown on the home screen — bump on every delivered build
+const APP_VERSION = 'v7'; // shown on the home screen — bump on every delivered build
 const FALLBACK_LOCATION = { lat: 43.8161, lng: -79.4633 };
 
 // ---- Design tokens (from the design canvas theme.css) -------------------
@@ -488,7 +488,7 @@ export default function App() {
       if (!res.ok) throw new Error(await describeBadResponse(res));
       saveMyLeads(myLeads.map((l) => (l.id === lead.id ? { ...l, rated: true } : l)));
       setRateStep('done');
-      speakQuick(outcome === 'no_contact' ? 'ممنون که خبر دادی. پیگیری می‌کنیم.' : 'ممنون! امتیازت ثبت شد.');
+      speakQuick(outcome === 'no_contact' ? 'سپاس از اطلاع‌رسانی شما. حتماً پیگیری می‌کنیم.' : 'سپاسگزارم. امتیاز شما ثبت شد.');
       setTimeout(() => setRateLead(null), 1800);
     } catch (err) {
       fail('ثبت امتیاز با خطا مواجه شد.', err);
@@ -537,10 +537,10 @@ export default function App() {
   }, [screen, selectedBusiness]);
 
   function introLine(biz) {
-    const fa = speaksPersian(biz) ? ' فارسی صحبت می‌کنه.' : '';
+    const fa = speaksPersian(biz) ? ' امکان گفت‌وگو به زبان فارسی هم وجود دارد.' : '';
     const tag = biz.tagline ? ` ${String(biz.tagline).replace(/[.。]$/, '')}.` : '';
-    const top = biz.top_rated ? ' از برترین‌های GlobalLink هست.' : '';
-    return `${biz.name}.${tag}${top}${fa} برای تماس، دکمه‌ی سبز پایین صفحه رو بزن.`;
+    const top = biz.top_rated ? ' از برگزیدگان گلوبال‌لینک است.' : '';
+    return `${biz.name}.${tag}${top}${fa} برای تماس، کافی است دکمهٔ سبز پایین صفحه را لمس کنید.`;
   }
 
   // Short spoken confirmation as soon as results appear (cached on the server
@@ -548,11 +548,11 @@ export default function App() {
   function announceResults(data) {
     const list = data?.results || [];
     let line;
-    if (data?.mode === 'name' && list[0]) line = `${list[0].name} رو پیدا کردم.`;
-    else if (data?.intent?.name_not_found) line = 'کسی با این اسم پیدا نکردم. نزدیک‌ترین گزینه‌ها رو برات آوردم.';
-    else if (list.length === 0) line = 'متأسفانه گزینه‌ای پیدا نکردم.';
-    else if (list.length === 1) line = 'یک گزینه پیدا کردم.';
-    else line = `${list.length} گزینه پیدا کردم.`;
+    if (data?.mode === 'name' && list[0]) line = `${list[0].name} را برایتان پیدا کردم.`;
+    else if (data?.intent?.name_not_found) line = 'موردی با این نام پیدا نشد. نزدیک‌ترین گزینه‌ها را برایتان آماده کرده‌ام.';
+    else if (list.length === 0) line = 'متأسفانه در حال حاضر گزینهٔ مناسبی پیدا نشد.';
+    else if (list.length === 1) line = 'یک گزینهٔ مناسب برایتان پیدا کردم.';
+    else line = `${list.length} گزینهٔ مناسب برایتان پیدا کردم.`;
     speakQuick(line);
   }
 
@@ -960,10 +960,10 @@ export default function App() {
     const parts = [];
     if (biz.brokerage_or_company) parts.push(`از ${biz.brokerage_or_company}`);
     if (biz.languages && biz.languages.length) {
-      parts.push(`به زبان‌های ${biz.languages.join('، ')} صحبت می‌کنه`);
+      parts.push(`به زبان‌های ${biz.languages.join('، ')} صحبت می‌کنند`);
     }
-    if (biz.phone) parts.push(`شماره تماسش ${biz.phone} هست`);
-    if (biz.address_text) parts.push(`آدرسش ${biz.address_text} هست`);
+    if (biz.phone) parts.push(`شمارهٔ تماس ${biz.phone} است`);
+    if (biz.address_text) parts.push(`نشانی ${biz.address_text} است`);
     return parts.join('، ');
   }
 
@@ -987,7 +987,7 @@ export default function App() {
       // One combined sentence instead of two separate TTS calls — cuts a
       // full network round-trip (and its playback-start delay) out of
       // every single business introduction.
-      await speak(`${name} رو پیدا کردم. می‌خوای بیشتر در موردش بدونی؟ بگو بله یا نه.`);
+      await speak(`${name} را برایتان پیدا کردم. مایلید اطلاعات بیشتری بشنوید؟ لطفاً بفرمایید بله یا نه.`);
       let wantsMore = await listenYesNo();
       console.log('INTRO wantsMore:', wantsMore);
 
@@ -995,7 +995,7 @@ export default function App() {
       // بله/نه apart, give the customer ONE more clear chance instead of
       // silently moving on and leaving them talking to dead air.
       if (wantsMore === 'unclear') {
-        await speak('ببخشید، متوجه نشدم. اگه می‌خوای بیشتر بدونی بگو «بله»، وگرنه بگو «نه».');
+        await speak('پوزش می‌خواهم، متوجه نشدم. اگر مایلید بیشتر بدانید، بفرمایید «بله»؛ در غیر این صورت «نه».');
         wantsMore = await listenYesNo();
         console.log('INTRO wantsMore (retry):', wantsMore);
       }
@@ -1003,27 +1003,27 @@ export default function App() {
       if (wantsMore === 'yes') {
         const summary = buildBusinessSummary(selectedBusiness);
         const extra = hasRoute
-          ? ' می‌خوای مسیر رو هم روی نقشه برات باز کنم؟ بگو بله یا نه.'
-          : ' اگه سوال دیگه‌ای داشتی بگو.';
+          ? ' مایلید مسیر را روی نقشه برایتان باز کنم؟ لطفاً بفرمایید بله یا نه.'
+          : ' اگر پرسش دیگری دارید، در خدمتم.';
         const infoText = summary
           ? `${summary}.`
-          : 'اطلاعات تماسش رو هم اینجا روی صفحه برات گذاشتم.';
-        await speak(`باشه، ${infoText}${extra}`);
+          : 'اطلاعات تماس روی صفحه در اختیارتان است.';
+        await speak(`بسیار خب. ${infoText}${extra}`);
         if (hasRoute) {
           const wantsDirections = await listenYesNo();
           console.log('INTRO wantsDirections:', wantsDirections);
           if (wantsDirections === 'yes') {
             openDirections();
           }
-          await speak('باشه، اگه سوال دیگه‌ای داشتی بگو.');
+          await speak('بسیار خب. اگر پرسش دیگری دارید، در خدمتم.');
         }
       } else if (wantsMore === 'no') {
-        await speak('باشه، هر وقت خواستی دوباره صدام کن.');
+        await speak('بسیار خب. هر زمان نیاز داشتید، در خدمتتان هستم.');
       } else {
         // Still unclear even after the retry — don't leave the customer
         // hanging in silence. The info is already visible on screen, so say
         // that much and move on gracefully instead of getting stuck.
-        await speak('باشه، اطلاعاتش رو همینجا روی صفحه گذاشتم. هر وقت سوالی داشتی صدام کن.');
+        await speak('بسیار خب. اطلاعات کامل روی صفحه در اختیارتان است. هر زمان پرسشی داشتید، در خدمتم.');
       }
 
       await listenForFollowUp();
