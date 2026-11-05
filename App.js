@@ -34,8 +34,8 @@ import {
 import * as Location from 'expo-location';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const API_BASE = 'http://137.184.169.205:3300';
-const APP_VERSION = 'v7'; // shown on the home screen — bump on every delivered build
+const API_BASE = 'https://api.globallinktradehub.com';
+const APP_VERSION = 'v9'; // shown on the home screen — bump on every delivered build
 const FALLBACK_LOCATION = { lat: 43.8161, lng: -79.4633 };
 
 // ---- Design tokens (from the design canvas theme.css) -------------------
