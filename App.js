@@ -17,6 +17,7 @@ import {
   StyleSheet,
   Alert,
   Linking,
+  Platform,
   Animated,
   Easing,
   StatusBar,
@@ -35,7 +36,7 @@ import * as Location from 'expo-location';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const API_BASE = 'https://api.globallinktradehub.com';
-const APP_VERSION = 'v9'; // shown on the home screen — bump on every delivered build
+const APP_VERSION = 'v11'; // shown on the home screen — bump on every delivered build
 const FALLBACK_LOCATION = { lat: 43.8161, lng: -79.4633 };
 
 // ---- Design tokens (from the design canvas theme.css) -------------------
@@ -705,7 +706,7 @@ export default function App() {
         const sres = await fetch(`${API_BASE}/search`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ transcript, lat: coords.lat, lng: coords.lng, limit: 8 }),
+          body: JSON.stringify({ transcript, lat: coords.lat, lng: coords.lng, limit: 40 }),
         });
         if (sres.ok) {
           const sdata = await sres.json();
@@ -813,19 +814,24 @@ export default function App() {
     Linking.openURL(`tel:${selectedBusiness.phone}`);
   }
 
+  // v10: directions only for subscribed businesses (contact unlocked); server sends real coordinates only for them
+  function canRoute(b) {
+    return !!b && ((b.lat && b.lng) || (b.address_text && b.address_text !== 'GTA'));
+  }
   function openDirections() {
-    if (!selectedBusiness) return;
-    const { lat, lng, address_text } = selectedBusiness;
-    const url =
-      lat && lng
-        ? `https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}`
-        : address_text
-        ? `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(address_text)}`
-        : null;
-    if (!url) {
-      return fail('آدرسی برای این کسب‌وکار ثبت نشده.');
+    const b = selectedBusiness;
+    if (!b || b.contact_locked || !canRoute(b)) return;
+    const dest = b.lat && b.lng ? `${b.lat},${b.lng}` : encodeURIComponent(b.address_text);
+    const google = `https://www.google.com/maps/dir/?api=1&destination=${dest}`;
+    if (Platform.OS === 'ios') {
+      Alert.alert('مسیریابی', b.name, [
+        { text: 'Apple Maps', onPress: () => Linking.openURL(`https://maps.apple.com/?daddr=${dest}&dirflg=d`) },
+        { text: 'Google Maps', onPress: () => Linking.openURL(google) },
+        { text: 'انصراف', style: 'cancel' },
+      ]);
+    } else {
+      Linking.openURL(google);
     }
-    Linking.openURL(url);
   }
 
   // --- Voice yes/no follow-up: "می‌خوای مسیر رو روی نقشه برات باز کنم؟" ---
@@ -1197,12 +1203,16 @@ export default function App() {
   // ---- Derived data for the results / compare screens --------------------
   const sortedBusinesses = useMemo(() => {
     const list = businesses.map((b, i) => ({ ...b, _i: i }));
-    if (sortBy === 'distance') list.sort((a, b) => (Number(a.distance_km) || 0) - (Number(b.distance_km) || 0));
+    if (sortBy === 'distance') { const d = (x) => (x.distance_km == null ? Infinity : Number(x.distance_km)); list.sort((a, b) => (d(a) === d(b) ? 0 : d(a) - d(b))); }
     else if (sortBy === 'rating') list.sort((a, b) => (Number(b.google_rating) || 0) - (Number(a.google_rating) || 0));
     else if (sortBy === 'price') list.sort((a, b) => (Number(a.price_tier) || 2) - (Number(b.price_tier) || 2));
     else if (sortBy === 'lang') list.sort((a, b) => Number(speaksPersian(b)) - Number(speaksPersian(a)));
     return list;
   }, [businesses, sortBy]);
+
+  // v11: show results 10 at a time ("show more"), up to 40 from the server
+  const [visibleCount, setVisibleCount] = useState(10);
+  useEffect(() => setVisibleCount(10), [businesses]);
 
   const compareList = businesses.filter((b) => compareIds.includes(b.id));
 
@@ -1427,7 +1437,7 @@ export default function App() {
                 <Btn title="جستجوی دوباره" onPress={startOver} style={{ marginTop: 16, alignSelf: 'stretch' }} />
               </View>
             )}
-            {sortedBusinesses.map((biz) => {
+            {sortedBusinesses.slice(0, visibleCount).map((biz) => {
               const selected = compareIds.includes(biz.id);
               const speed = speedLabel(biz.avg_response_min);
               return (
@@ -1480,6 +1490,14 @@ export default function App() {
                 </View>
               );
             })}
+            {sortedBusinesses.length > visibleCount ? (
+              <Btn
+                title={`نمایش ${fa(Math.min(10, sortedBusinesses.length - visibleCount))} گزینهٔ دیگر`}
+                variant="secondary"
+                onPress={() => setVisibleCount((n) => n + 10)}
+                style={{ marginTop: 4 }}
+              />
+            ) : null}
           </ScrollView>
 
           {businesses.length > 1 ? (
@@ -1583,12 +1601,12 @@ export default function App() {
                     <Text style={[s.metaStrong, { letterSpacing: 1 }]}>{fa(selectedBusiness.phone_masked || '***-***-****')}</Text>
                   </View>
                 ) : null}
-                <TouchableOpacity style={s.infoRow} onPress={openDirections}>
+                <View style={s.infoRow}>
                   <Text style={s.meta}>محدوده</Text>
-                  <Text style={s.infoLink}>
-                    {selectedBusiness.area && selectedBusiness.area !== 'GTA' ? selectedBusiness.area : 'تورنتو بزرگ'} · حدود ۱ کیلومتر
+                  <Text style={s.metaStrong}>
+                    {selectedBusiness.area && selectedBusiness.area !== 'GTA' ? selectedBusiness.area : 'تورنتو بزرگ'}
                   </Text>
-                </TouchableOpacity>
+                </View>
                 {selectedBusiness.has_website || selectedBusiness.has_email ? (
                   <View style={[s.infoRow, { borderBottomWidth: 0 }]}>
                     <Text style={s.meta}>وب‌سایت و ایمیل</Text>
@@ -1635,6 +1653,10 @@ export default function App() {
                 ) : null}
               </View>
             )}
+
+            {!selectedBusiness.contact_locked && canRoute(selectedBusiness) ? (
+              <Btn title="🧭  مسیریابی تا این کسب‌وکار" variant="secondary" onPress={openDirections} style={{ marginTop: 12 }} />
+            ) : null}
 
             {selectedBusiness.about || (selectedBusiness.services && selectedBusiness.services.length) ? (
               <View style={[s.card, { marginTop: 14, gap: 8 }]}>
