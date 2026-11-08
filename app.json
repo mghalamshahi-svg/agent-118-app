@@ -2,7 +2,7 @@
   "expo": {
     "name": "118",
     "slug": "118-voice-app",
-    "version": "11.0.0",
+    "version": "15.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
     "ios": {
@@ -12,7 +12,7 @@
         "NSLocationWhenInUseUsageDescription": "برای پیدا کردن نزدیک‌ترین کسب‌وکارها به موقعیت مکانی‌ات نیاز داریم."
       },
       "bundleIdentifier": "ca.globallink.app118",
-      "buildNumber": "11"
+      "buildNumber": "15"
     },
     "android": {
       "permissions": [
@@ -21,7 +21,7 @@
         "ACCESS_COARSE_LOCATION"
       ],
       "package": "ca.globallink.app118",
-      "versionCode": 11,
+      "versionCode": 15,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#007344"

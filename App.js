@@ -7,6 +7,9 @@
 // v6 (2026-11-03): navigation fixes — screen history, Android back button
 // goes to the previous screen instead of closing the app, back + home on
 // every screen, cancel on loading screens.
+// v14 (2026-11-08): live business count on the home screen (WordPress
+// /wp-json/gl-app/v1/stats, cached 10 min) and an Events tab (list + detail +
+// ticket / directions / share) from /wp-json/gl-app/v1/events.
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
   View,
@@ -24,6 +27,8 @@ import {
   SafeAreaView,
   Image,
   BackHandler,
+  RefreshControl,
+  Share,
 } from 'react-native';
 import {
   useAudioRecorder,
@@ -36,8 +41,14 @@ import * as Location from 'expo-location';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const API_BASE = 'https://api.globallinktradehub.com';
-const APP_VERSION = 'v11'; // shown on the home screen — bump on every delivered build
+const APP_VERSION = 'v15'; // shown on the home screen — bump on every delivered build
 const FALLBACK_LOCATION = { lat: 43.8161, lng: -79.4633 };
+// v14: public read-only WordPress endpoints (WPCode snippets "118 Stats API" + events API)
+const WP_APP = 'https://globallinktradehub.com/wp-json/gl-app/v1';
+const STATS_KEY = 'gl118.stats.v1';
+const EVENTS_KEY = 'gl118.events.v1';
+const STATS_TTL_MS = 10 * 60 * 1000;
+const GL_VENUE = 'Global Link Trade Hub, 88 Doncaster Ave, Thornhill, ON';
 
 // ---- Design tokens (from the design canvas theme.css) -------------------
 const C = {
@@ -333,6 +344,139 @@ function WorkingScreen({ label, sub, quote, onCancel }) {
   );
 }
 
+
+// ---- v14 helpers: counts, Persian (Jalali) dates, event times ------------
+function formatCount(n) {
+  const v = Math.round(Number(n));
+  if (!isFinite(v) || v <= 0) return '';
+  return fa(String(v).replace(/\B(?=(\d{3})+(?!\d))/g, '٬'));
+}
+function toJalali(gy, gm, gd) {
+  const g_d_m = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
+  const gy2 = gm > 2 ? gy + 1 : gy;
+  let days = 355666 + 365 * gy + Math.floor((gy2 + 3) / 4) - Math.floor((gy2 + 99) / 100) + Math.floor((gy2 + 399) / 400) + gd + g_d_m[gm - 1];
+  let jy = -1595 + 33 * Math.floor(days / 12053);
+  days %= 12053;
+  jy += 4 * Math.floor(days / 1461);
+  days %= 1461;
+  if (days > 365) {
+    jy += Math.floor((days - 1) / 365);
+    days = (days - 1) % 365;
+  }
+  const jm = days < 186 ? 1 + Math.floor(days / 31) : 7 + Math.floor((days - 186) / 30);
+  const jd = 1 + (days < 186 ? days % 31 : (days - 186) % 30);
+  return [jy, jm, jd];
+}
+const J_MONTHS = ['فروردین', 'اردیبهشت', 'خرداد', 'تیر', 'مرداد', 'شهریور', 'مهر', 'آبان', 'آذر', 'دی', 'بهمن', 'اسفند'];
+const FA_WEEKDAYS = ['یکشنبه', 'دوشنبه', 'سه‌شنبه', 'چهارشنبه', 'پنجشنبه', 'جمعه', 'شنبه'];
+const EN_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+function parseYmd(str) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(str || ''));
+  if (!m) return null;
+  return { y: +m[1], m: +m[2], d: +m[3], date: new Date(+m[1], +m[2] - 1, +m[3]) };
+}
+function eventDateFa(str) {
+  const p = parseYmd(str);
+  if (!p) return '';
+  const [jy, jm, jd] = toJalali(p.y, p.m, p.d);
+  return `${FA_WEEKDAYS[p.date.getDay()]} ${fa(jd)} ${J_MONTHS[jm - 1]} ${fa(jy)}`;
+}
+function eventDateEn(str) {
+  const p = parseYmd(str);
+  return p ? `${EN_MONTHS[p.m - 1]} ${p.d}, ${p.y}` : '';
+}
+function eventDayBlock(str) {
+  const p = parseYmd(str);
+  if (!p) return null;
+  const [, jm, jd] = toJalali(p.y, p.m, p.d);
+  return { day: fa(jd), month: J_MONTHS[jm - 1] };
+}
+function timeFa(t) {
+  const m = /^\s*(\d{1,2}):(\d{2})\s*([AaPp][Mm])?\s*$/.exec(String(t || ''));
+  if (!m) return fa(t || '');
+  let h = +m[1];
+  const mer = (m[3] || '').toUpperCase();
+  if (mer === 'PM' && h < 12) h += 12;
+  if (mer === 'AM' && h === 12) h = 0;
+  const part = h < 12 ? 'صبح' : h < 16 ? 'بعدازظهر' : h < 19 ? 'عصر' : 'شب';
+  const h12 = h % 12 === 0 ? 12 : h % 12;
+  return `${fa(h12)}:${fa(m[2])} ${part}`;
+}
+function eventTimeRange(ev) {
+  if (!ev?.start_time) return '';
+  const a = timeFa(ev.start_time);
+  const b = ev.end_time ? timeFa(ev.end_time) : '';
+  return b ? `${a} تا ${b}` : a;
+}
+function eventVenue(ev) {
+  const loc = String(ev?.location || '').trim();
+  if (!loc || /global\s*link/i.test(loc)) return { label: 'Global Link Trade Hub — ۸۸ Doncaster Ave، تورنهیل', query: GL_VENUE };
+  return { label: loc, query: loc };
+}
+function daysUntil(str) {
+  const p = parseYmd(str);
+  if (!p) return 9999;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  return Math.round((p.date - today) / 86400000);
+}
+function whenLabel(str) {
+  const n = daysUntil(str);
+  if (n === 0) return 'امروز';
+  if (n === 1) return 'فردا';
+  if (n > 1 && n < 7) return `${fa(n)} روز دیگر`;
+  return '';
+}
+
+function EventPoster({ uri, ev, style, compact }) {
+  const [broken, setBroken] = useState(false);
+  if (uri && !broken) {
+    return (
+      <Image source={{ uri }} onError={() => setBroken(true)} style={[{ backgroundColor: C.greenTint }, style]} resizeMode="cover" accessibilityIgnoresInvertColors />
+    );
+  }
+  const b = eventDayBlock(ev?.start_date);
+  return (
+    <View style={[{ backgroundColor: C.green, alignItems: 'center', justifyContent: 'center' }, style]}>
+      <View style={s.posterDiamond} />
+      {b ? <Text style={[s.posterDay, compact && { fontSize: 30 }]}>{b.day}</Text> : null}
+      {b ? <Text style={s.posterMonth}>{b.month}</Text> : null}
+    </View>
+  );
+}
+
+function TabBar({ active, onSearch, onEvents, eventsBadge }) {
+  const Item = ({ id, label, onPress, glyph }) => {
+    const on = active === id;
+    return (
+      <TouchableOpacity style={s.tabItem} onPress={onPress} activeOpacity={0.8} accessibilityRole="tab" accessibilityState={{ selected: on }}>
+        <View style={[s.tabGlyph, on && { backgroundColor: C.greenTint }]}>{glyph(on ? C.green : C.muted)}</View>
+        <Text style={[s.tabLabel, on && { color: C.green }]}>{label}</Text>
+        {id === 'events' && eventsBadge ? (
+          <View style={s.tabBadge}>
+            <Text style={s.tabBadgeText}>{fa(eventsBadge)}</Text>
+          </View>
+        ) : null}
+      </TouchableOpacity>
+    );
+  };
+  return (
+    <View style={s.tabBar}>
+      <Item id="search" label="جست‌وجو" onPress={onSearch} glyph={(c) => <MicGlyph color={c} scale={0.55} />} />
+      <Item
+        id="events"
+        label="رویدادها"
+        onPress={onEvents}
+        glyph={(c) => (
+          <View style={[s.calGlyph, { borderColor: c }]}>
+            <View style={[s.calGlyphTop, { backgroundColor: c }]} />
+          </View>
+        )}
+      />
+    </View>
+  );
+}
+
 export default function App() {
   const [screen, setScreenRaw] = useState('record');
   // ---- v5 navigation: history stack + cancel of in-flight steps ----------
@@ -428,6 +572,12 @@ export default function App() {
   const phoneCoordsRef = useRef(null);
   const playerRef = useRef(null);
   const introducedRef = useRef(null);
+  // v12: spoken confirmation + quick follow-up questions before the results
+  const [pending, setPending] = useState(null); // the /search response waiting for the customer's OK
+  const [picks, setPicks] = useState({}); // follow-up answers: { area: 'north_york', refine: 0 }
+  const [refining, setRefining] = useState(false);
+  const welcomedRef = useRef(false);
+  const lastScreenRef = useRef('record');
 
   useEffect(() => {
     AsyncStorage.getItem(MY_LEADS_KEY)
@@ -533,7 +683,10 @@ export default function App() {
       introducedRef.current = selectedBusiness.id;
       speakQuick(introLine(selectedBusiness));
     }
-    if (screen !== 'detail') stopSpeaking();
+    // v13: stop the business intro only when LEAVING the detail screen. It used to stop on every screen change,
+    // which randomly cut off the confirmation / results lines that start right after a screen change.
+    if (screen !== 'detail' && lastScreenRef.current === 'detail') stopSpeaking();
+    lastScreenRef.current = screen;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [screen, selectedBusiness]);
 
@@ -544,9 +697,19 @@ export default function App() {
     return `${biz.name}.${tag}${top}${fa} برای تماس، کافی است دکمهٔ سبز پایین صفحه را لمس کنید.`;
   }
 
+  // v12: one welcome line when the app opens (not on every return to the home screen)
+  useEffect(() => {
+    if (welcomedRef.current) return;
+    welcomedRef.current = true;
+    const t = setTimeout(() => speakQuick('به ۱۱۸ خوش آمدید. چه کمکی از دستمان برمی‌آید؟'), 250);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Short spoken confirmation as soon as results appear (cached on the server
   // after first use, so it plays almost instantly).
   function announceResults(data) {
+    if (data?.announce && data.announce.length) return speakSequence(data.announce); // v13: server lines, pre-generated
     const list = data?.results || [];
     let line;
     if (data?.mode === 'name' && list[0]) line = `${list[0].name} را برایتان پیدا کردم.`;
@@ -554,6 +717,10 @@ export default function App() {
     else if (list.length === 0) line = 'متأسفانه در حال حاضر گزینهٔ مناسبی پیدا نشد.';
     else if (list.length === 1) line = 'یک گزینهٔ مناسب برایتان پیدا کردم.';
     else line = `${list.length} گزینهٔ مناسب برایتان پیدا کردم.`;
+    const near = list.filter((b) => b.distance_km != null).sort((a, b) => a.distance_km - b.distance_km)[0];
+    if (near && data?.mode !== 'name' && list.length > 1) {
+      line += ` نزدیک‌ترین گزینه، ${near.name}، حدود ${Math.max(1, Math.round(near.distance_km))} کیلومتر با شما فاصله دارد.`;
+    }
     speakQuick(line);
   }
 
@@ -564,7 +731,7 @@ export default function App() {
   // Warm the server's audio cache for the first few results, so tapping a
   // business plays its intro immediately instead of waiting ~2s for TTS.
   function prefetchSpeech(list) {
-    (list || []).slice(0, 5).forEach((biz) => {
+    (list || []).slice(0, 3).forEach((biz) => {
       fetch(speechUrl(introLine(biz)), { method: 'GET' }).catch(() => {});
     });
   }
@@ -577,7 +744,26 @@ export default function App() {
     playerRef.current = null;
   }
 
-  async function speakQuick(text) {
+  // v13: play several short lines one after another (each one is cached on the server separately)
+  const speakSeqRef = useRef(0);
+  async function speakSequence(lines) {
+    const list = (lines || []).map((t) => String(t || '').trim()).filter(Boolean);
+    if (!list.length) return;
+    const my = ++speakSeqRef.current;
+    const playAt = async (i) => {
+      if (i >= list.length || my !== speakSeqRef.current) return;
+      await speakQuick(list[i], true);
+      const player = playerRef.current;
+      if (!player) return;
+      const sub = player.addListener('playbackStatusUpdate', (st) => {
+        if (st.didJustFinish) { try { sub.remove(); } catch (e) {} playAt(i + 1); }
+      });
+    };
+    playAt(0);
+  }
+
+  async function speakQuick(text, fromSequence) {
+    if (!fromSequence) speakSeqRef.current++; // a single line cancels any running sequence
     stopSpeaking();
     try {
       // Playback-only mode routes audio to the loud main speaker on iOS
@@ -692,7 +878,41 @@ export default function App() {
     }
   }
 
-  async function confirmAndExtractIntent(textOverride) {
+  // v12: results go through a short confirmation step (spoken), with up to 2 tap-to-answer questions
+  function applyResults(sdata) {
+    setIntent(sdata.intent || null);
+    setBusinesses(sdata.results || []);
+    setSearchMode(sdata.mode === 'name' ? 'name' : 'category');
+    setQueryName(sdata.query_name || sdata.intent?.person_name_fa || '');
+    setCompareIds([]);
+    setSortBy('match');
+    prefetchSpeech(sdata.results);
+    setScreen('results');
+    announceResults(sdata);
+  }
+  function confirmLine(sdata) {
+    return String(sdata?.confirm_fa || sdata?.intent?.summary || '').trim();
+  }
+  async function showPendingResults() {
+    if (!pending) return;
+    const hasPick = picks.area != null || picks.refine != null;
+    if (!hasPick || !pending.search_id) return applyResults(pending);
+    setRefining(true);
+    try {
+      const r = await fetch(`${API_BASE}/search/refine`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ search_id: pending.search_id, area: picks.area, refine: picks.refine }),
+      });
+      applyResults(r.ok ? await r.json() : pending);
+    } catch (e) {
+      applyResults(pending);
+    } finally {
+      setRefining(false);
+    }
+  }
+
+  async function confirmAndExtractIntent(textOverride, opts = {}) {
     const transcript = typeof textOverride === 'string' ? textOverride : transcriptState();
     if (!transcript.trim()) {
       return fail('اول باید یک پیام صوتی ضبط کنی یا متن رو بنویسی.');
@@ -711,15 +931,16 @@ export default function App() {
         if (sres.ok) {
           const sdata = await sres.json();
           if (gen !== navGenRef.current) return;
-          setIntent(sdata.intent || null);
-          setBusinesses(sdata.results || []);
-          setSearchMode(sdata.mode === 'name' ? 'name' : 'category');
-          setQueryName(sdata.query_name || sdata.intent?.person_name_fa || '');
-          setCompareIds([]);
-          setSortBy('match');
-          prefetchSpeech(sdata.results);
-          setScreen('results');
-          announceResults(sdata);
+          const line = confirmLine(sdata);
+          if (opts.direct || sdata.mode === 'name' || !(sdata.results || []).length || !line) {
+            applyResults(sdata);
+            return;
+          }
+          setPending(sdata);
+          setPicks({});
+          setScreen('confirmSearch');
+          const q = (sdata.followups || [])[0];
+          speakSequence(sdata.say && sdata.say.length ? sdata.say : [line, q ? q.q_fa : 'اگر درست است، دکمهٔ تأیید را بزنید.']);
           return;
         }
         if (sres.status !== 404) throw new Error(await describeBadResponse(sres));
@@ -1197,7 +1418,7 @@ export default function App() {
 
   function quickSearch(text) {
     setTranscript(text);
-    confirmAndExtractIntent(text);
+    confirmAndExtractIntent(text, { direct: true });
   }
 
   // ---- Derived data for the results / compare screens --------------------
@@ -1238,6 +1459,95 @@ export default function App() {
     { id: 'lang', label: 'فارسی‌زبان' },
   ];
 
+
+  // ---- v14: live business count + events ---------------------------------
+  const [bizCount, setBizCount] = useState(null);
+  const statsAtRef = useRef(0);
+  const [events, setEvents] = useState([]);
+  const [eventsState, setEventsState] = useState('idle'); // idle | loading | ok | error
+  const [eventFilter, setEventFilter] = useState('all'); // all | week | month
+  const [selectedEvent, setSelectedEvent] = useState(null);
+
+  async function loadStats(force) {
+    if (!force && Date.now() - statsAtRef.current < STATS_TTL_MS) return;
+    statsAtRef.current = Date.now();
+    try {
+      const res = await fetch(`${WP_APP}/stats`);
+      const j = await res.json();
+      const n = Number(j?.businesses);
+      if (res.ok && n > 0) {
+        setBizCount(n);
+        AsyncStorage.setItem(STATS_KEY, JSON.stringify({ n, at: Date.now() })).catch(() => {});
+      }
+    } catch (e) {
+      statsAtRef.current = 0; // retry next time the home screen opens
+    }
+  }
+  async function loadEvents() {
+    setEventsState((st) => (st === 'ok' ? 'ok' : 'loading'));
+    try {
+      const res = await fetch(`${WP_APP}/events`);
+      const j = await res.json();
+      const list = Array.isArray(j?.events) ? j.events : Array.isArray(j) ? j : [];
+      list.sort((a, b) => (b.featured ? 1 : 0) - (a.featured ? 1 : 0) || String(a.start_date).localeCompare(String(b.start_date)));
+      setEvents(list);
+      setEventsState('ok');
+      AsyncStorage.setItem(EVENTS_KEY, JSON.stringify(list)).catch(() => {});
+    } catch (e) {
+      setEventsState((st) => (st === 'ok' ? 'ok' : 'error'));
+    }
+  }
+  useEffect(() => {
+    AsyncStorage.multiGet([STATS_KEY, EVENTS_KEY])
+      .then(([st, ev]) => {
+        try {
+          const c = JSON.parse(st[1] || 'null');
+          if (c?.n) setBizCount((cur) => cur || c.n);
+          const e = JSON.parse(ev[1] || 'null');
+          if (Array.isArray(e) && e.length) {
+            setEvents((cur) => (cur.length ? cur : e));
+            setEventsState((cur) => (cur === 'idle' || cur === 'loading' ? 'ok' : cur));
+          }
+        } catch (_) {}
+      })
+      .catch(() => {});
+    loadStats(true);
+    loadEvents();
+  }, []);
+  useEffect(() => {
+    if (screen === 'record') loadStats(false);
+  }, [screen]);
+  const upcomingEvents = useMemo(() => events.filter((e) => daysUntil(e.start_date) >= 0 || daysUntil(e.end_date) >= 0), [events]);
+  const filteredEvents = useMemo(() => {
+    if (eventFilter === 'week') return upcomingEvents.filter((e) => daysUntil(e.start_date) <= 7);
+    if (eventFilter === 'month') return upcomingEvents.filter((e) => daysUntil(e.start_date) <= 31);
+    return upcomingEvents;
+  }, [upcomingEvents, eventFilter]);
+  function openEvents() {
+    stopSpeaking();
+    if (eventsState !== 'loading') loadEvents();
+    setScreen('events');
+  }
+  function openEvent(ev) {
+    setSelectedEvent(ev);
+    setScreen('eventDetail');
+  }
+  function openTicket(ev) {
+    const url = ev?.ticket_url;
+    if (!url) return;
+    Linking.openURL(url).catch(() => Alert.alert('خطا', 'باز کردن صفحه‌ی بلیت ممکن نشد.'));
+  }
+  function openEventMap(ev) {
+    const q = encodeURIComponent(eventVenue(ev).query);
+    const url = Platform.OS === 'ios' ? `http://maps.apple.com/?q=${q}` : `https://www.google.com/maps/search/?api=1&query=${q}`;
+    Linking.openURL(url).catch(() => {});
+  }
+  function shareEvent(ev) {
+    Share.share({
+      message: `${ev.title}\n${eventDateFa(ev.start_date)}${ev.start_time ? ' — ' + timeFa(ev.start_time) : ''}\n${eventVenue(ev).label}\n${ev.ticket_url || ''}`,
+    }).catch(() => {});
+  }
+
   const recording = recordingState === 'recording';
 
   return (
@@ -1249,9 +1559,12 @@ export default function App() {
         <View style={s.fill}>
           <View style={s.homeHeader}>
             <View style={s.brandRow}>
-              <View style={s.brandMark}>
-                <View style={s.brandDiamond} />
-              </View>
+              <Image
+                source={require('./assets/globallink-mark.png')}
+                style={s.brandLogo}
+                resizeMode="contain"
+                accessibilityLabel="GlobalLink"
+              />
               <Text style={s.brandText}>GlobalLink Trade Hub</Text>
             </View>
             <Chip label="تورنتو بزرگ (GTA)" tint />
@@ -1315,7 +1628,10 @@ export default function App() {
 
             {!recording && !errorMsg && !rateLead && !pendingRating ? (
               <View style={s.warmCard}>
-                <Text style={s.warmTitle}>بیش از ۲٬۳۰۰ کسب‌وکار فارسی‌زبان در تورنتو بزرگ</Text>
+                <View style={s.countRow}>
+                  <Text style={s.countNum}>{bizCount ? formatCount(bizCount) : '۳٬۸۰۰+'}</Text>
+                  <Text style={s.countLabel}>کسب‌وکار فارسی‌زبان{'\n'}در تورنتو بزرگ</Text>
+                </View>
                 <Text style={s.warmText}>از مشاور املاک و لوله‌کش تا شیرینی‌فروشی محله — هم‌زبان و نزدیک خودت. جستجو برای شما همیشه رایگانه.</Text>
                 <View style={s.stepsRow}>
                   {['بگو', 'پیدا می‌کنیم', 'وصل می‌شی'].map((t, i) => (
@@ -1328,6 +1644,18 @@ export default function App() {
                   ))}
                 </View>
               </View>
+            ) : null}
+
+            {!recording && upcomingEvents.length ? (
+              <TouchableOpacity style={s.nextEvent} onPress={() => openEvent(upcomingEvents[0])} activeOpacity={0.85}>
+                <EventPoster uri={upcomingEvents[0].image} ev={upcomingEvents[0]} style={s.nextEventThumb} compact />
+                <View style={{ flex: 1 }}>
+                  <Text style={s.nextEventKicker}>{whenLabel(upcomingEvents[0].start_date) || 'رویداد بعدی'}</Text>
+                  <Text style={s.cardTitle} numberOfLines={1}>{upcomingEvents[0].title}</Text>
+                  <Text style={s.meta} numberOfLines={1}>{eventDateFa(upcomingEvents[0].start_date)}</Text>
+                </View>
+                <Text style={s.chev}>‹</Text>
+              </TouchableOpacity>
             ) : null}
 
             {errorMsg ? (
@@ -1351,6 +1679,102 @@ export default function App() {
             </View>
           </View>
           <Text style={s.versionTag}>{`نسخه ${APP_VERSION}`}</Text>
+          <TabBar active="search" onSearch={() => {}} onEvents={openEvents} eventsBadge={upcomingEvents.length} />
+        </View>
+      )}
+
+      {/* v14 — Events list */}
+      {screen === 'events' && (
+        <View style={s.fill}>
+          <TopBar title="رویدادهای GlobalLink" onBack={goBack} />
+          <View style={s.sortRow}>
+            {[
+              ['all', 'همه'],
+              ['week', 'این هفته'],
+              ['month', 'این ماه'],
+            ].map(([id, label]) => (
+              <Chip key={id} label={label} active={eventFilter === id} onPress={() => setEventFilter(id)} />
+            ))}
+          </View>
+          <ScrollView
+            style={s.body}
+            contentContainerStyle={{ paddingBottom: 24, gap: 14 }}
+            refreshControl={<RefreshControl refreshing={eventsState === 'loading'} onRefresh={loadEvents} tintColor={C.green} colors={[C.green]} />}
+          >
+            {eventsState === 'error' && !events.length ? (
+              <View style={[s.card, { alignItems: 'center', gap: 10 }]}>
+                <Text style={s.cardTitle}>اتصال برقرار نشد</Text>
+                <Text style={s.meta}>اینترنت رو بررسی کن و دوباره امتحان کن.</Text>
+                <Btn title="تلاش دوباره" small onPress={loadEvents} />
+              </View>
+            ) : null}
+            {eventsState === 'loading' && !events.length ? <Text style={[s.meta, { textAlign: 'center', marginTop: 30 }]}>در حال دریافت رویدادها...</Text> : null}
+            {eventsState === 'ok' && !filteredEvents.length ? (
+              <View style={[s.card, { alignItems: 'center', gap: 8 }]}>
+                <Text style={s.cardTitle}>{eventFilter === 'all' ? 'فعلاً رویداد پیش‌رویی نداریم' : 'در این بازه رویدادی نیست'}</Text>
+                <Text style={s.meta}>به‌زودی رویدادهای تازه این‌جا اعلام می‌شن.</Text>
+              </View>
+            ) : null}
+            {filteredEvents.map((ev) => {
+              const when = whenLabel(ev.start_date);
+              return (
+                <TouchableOpacity key={String(ev.id)} style={[s.eventCard, ev.featured && s.eventCardFeatured]} onPress={() => openEvent(ev)} activeOpacity={0.9}>
+                  <EventPoster uri={ev.image} ev={ev} style={s.eventCardImg} />
+                  <View style={{ padding: 14, gap: 4 }}>
+                    <View style={[s.rowRtl, { gap: 6, flexWrap: 'wrap' }]}>
+                      {ev.featured ? <Badge label="ویژه" kind="speed" /> : null}
+                      {when ? <Badge label={when} kind="lang" /> : null}
+                    </View>
+                    <Text style={[s.cardTitle, { fontSize: 16 }]} numberOfLines={2}>{ev.title}</Text>
+                    <Text style={s.metaStrong}>{eventDateFa(ev.start_date)}{ev.start_time ? `  ·  ${timeFa(ev.start_time)}` : ''}</Text>
+                    <Text style={s.meta} numberOfLines={1}>{eventVenue(ev).label}</Text>
+                  </View>
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+          <TabBar active="events" onSearch={() => setScreen('record')} onEvents={() => {}} eventsBadge={upcomingEvents.length} />
+        </View>
+      )}
+
+      {/* v14 — Event detail */}
+      {screen === 'eventDetail' && selectedEvent && (
+        <View style={s.fill}>
+          <TopBar title="" onBack={goBack} right={<TouchableOpacity onPress={() => shareEvent(selectedEvent)} hitSlop={12}><Text style={[s.metaStrong, { color: C.green }]}>اشتراک</Text></TouchableOpacity>} />
+          <ScrollView contentContainerStyle={{ paddingBottom: 24 }}>
+            <EventPoster uri={selectedEvent.image} ev={selectedEvent} style={s.eventHero} />
+            <View style={{ paddingHorizontal: 20, paddingTop: 18 }}>
+              <View style={[s.rowRtl, { gap: 6, flexWrap: 'wrap', marginBottom: 8 }]}>
+                {selectedEvent.featured ? <Badge label="ویژه" kind="speed" /> : null}
+                {whenLabel(selectedEvent.start_date) ? <Badge label={whenLabel(selectedEvent.start_date)} kind="lang" /> : null}
+              </View>
+              <Text style={[s.detailName, { textAlign: 'right' }]}>{selectedEvent.title}</Text>
+              <View style={{ marginTop: 14 }}>
+                <View style={s.infoRow}>
+                  <Text style={s.meta}>تاریخ</Text>
+                  <View style={{ alignItems: 'flex-start', flexShrink: 1 }}>
+                    <Text style={s.metaStrong}>{eventDateFa(selectedEvent.start_date)}</Text>
+                    <Text style={[s.meta, { textAlign: 'left' }]}>{eventDateEn(selectedEvent.start_date)}</Text>
+                  </View>
+                </View>
+                {eventTimeRange(selectedEvent) ? (
+                  <View style={s.infoRow}>
+                    <Text style={s.meta}>ساعت</Text>
+                    <Text style={s.metaStrong}>{eventTimeRange(selectedEvent)}</Text>
+                  </View>
+                ) : null}
+                <TouchableOpacity style={s.infoRow} onPress={() => openEventMap(selectedEvent)}>
+                  <Text style={s.meta}>مکان</Text>
+                  <Text style={s.infoLink}>{eventVenue(selectedEvent).label}</Text>
+                </TouchableOpacity>
+              </View>
+              {selectedEvent.summary ? <Text style={[s.helpText, { marginTop: 14, fontSize: 14 }]}>{selectedEvent.summary}</Text> : null}
+            </View>
+          </ScrollView>
+          <View style={s.detailFooter}>
+            {selectedEvent.ticket_url ? <Btn title="خرید بلیت" variant="amber" onPress={() => openTicket(selectedEvent)} /> : null}
+            <Btn title="🧭 مسیریابی تا محل رویداد" variant="secondary" small onPress={() => openEventMap(selectedEvent)} />
+          </View>
         </View>
       )}
 
@@ -1385,6 +1809,47 @@ export default function App() {
           <View style={s.footerBar}>
             <Btn title="ضبط دوباره" variant="secondary" onPress={startOver} style={{ flex: 1 }} />
             <Btn title="پیدا کن" onPress={() => confirmAndExtractIntent()} style={{ flex: 1.4 }} />
+          </View>
+        </View>
+      )}
+
+      {/* 2c. v12: confirm what we understood + optional quick questions */}
+      {screen === 'confirmSearch' && pending && (
+        <View style={s.fill}>
+          <TopBar title="تأیید درخواست" onBack={goBack} onHome={startOver} />
+          <ScrollView style={s.body} contentContainerStyle={{ paddingVertical: 20, gap: 14 }}>
+            <View style={[s.card, { gap: 10 }]}>
+              <Text style={s.meta}>این چیزی است که متوجه شدم:</Text>
+              <Text style={[s.cardTitle, { fontSize: 19, lineHeight: 32 }]}>{confirmLine(pending)}</Text>
+              <TouchableOpacity onPress={() => speakSequence(pending.say && pending.say.length ? pending.say : [confirmLine(pending)])} hitSlop={8}>
+                <Text style={[s.metaStrong, { color: C.green }]}>▶  دوباره بشنوم</Text>
+              </TouchableOpacity>
+            </View>
+            {(pending.followups || []).map((q) => (
+              <View key={q.id} style={[s.card, { gap: 10 }]}>
+                <Text style={s.cardTitle}>{q.q_fa}</Text>
+                <View style={[s.badgeRow, { flexWrap: 'wrap' }]}>
+                  {q.options.map((o) => (
+                    <Chip
+                      key={String(o.id)}
+                      label={o.label_fa}
+                      active={picks[q.id] === o.id}
+                      onPress={() => setPicks((p) => ({ ...p, [q.id]: p[q.id] === o.id ? undefined : o.id }))}
+                    />
+                  ))}
+                </View>
+                <Text style={[s.meta, { fontSize: 11.5 }]}>اختیاری — اگر مهم نیست، رد شوید.</Text>
+              </View>
+            ))}
+          </ScrollView>
+          <View style={s.footerBar}>
+            <Btn title="دوباره بگویم" variant="secondary" onPress={startOver} style={{ flex: 1 }} />
+            <Btn
+              title={refining ? 'در حال آماده‌سازی…' : `بله، ${fa((pending.results || []).length)} گزینه را نشان بده`}
+              onPress={showPendingResults}
+              disabled={refining}
+              style={{ flex: 1.6 }}
+            />
           </View>
         </View>
       )}
@@ -1833,6 +2298,7 @@ const s = StyleSheet.create({
   // home
   homeHeader: { flexDirection: 'row-reverse', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 20, paddingTop: 12, paddingBottom: 8 },
   brandRow: { flexDirection: 'row-reverse', alignItems: 'center', gap: 8 },
+  brandLogo: { width: 38, height: 38 },
   brandMark: { width: 34, height: 34, borderRadius: 10, backgroundColor: C.green, alignItems: 'center', justifyContent: 'center' },
   brandDiamond: { width: 13, height: 13, borderWidth: 2, borderColor: '#fff', transform: [{ rotate: '45deg' }], borderRadius: 2 },
   brandText: { fontWeight: '800', fontSize: 15, color: C.ink },
@@ -1910,4 +2376,28 @@ const s = StyleSheet.create({
   errorBox: { marginTop: 8, alignSelf: 'stretch', backgroundColor: '#FDECEA', borderRadius: 12, borderWidth: 1, borderColor: '#F5C6C0', padding: 12 },
   errorBoxTitle: { fontSize: 12, fontWeight: '700', color: '#8A2E24', marginBottom: 6, textAlign: 'right' },
   errorBoxText: { fontSize: 12, color: '#8A2E24', textAlign: 'left' },
+
+  // v14 — live count, tab bar, events
+  countRow: { flexDirection: 'row-reverse', alignItems: 'center', gap: 12 },
+  countNum: { fontSize: 30, fontWeight: '900', color: C.green, letterSpacing: 0.5 },
+  countLabel: { fontSize: 14, fontWeight: '800', color: C.ink, textAlign: 'right', lineHeight: 22 },
+  nextEvent: { alignSelf: 'stretch', flexDirection: 'row-reverse', alignItems: 'center', gap: 12, backgroundColor: '#fff', borderWidth: 1, borderColor: C.line, borderRadius: 16, padding: 10 },
+  nextEventThumb: { width: 54, height: 54, borderRadius: 12, overflow: 'hidden' },
+  nextEventKicker: { fontSize: 11.5, fontWeight: '800', color: C.orange, textAlign: 'right' },
+  chev: { fontSize: 24, color: C.muted, paddingHorizontal: 4 },
+  tabBar: { flexDirection: 'row-reverse', backgroundColor: '#fff', borderTopWidth: 1, borderTopColor: C.line, paddingTop: 8, paddingBottom: Platform.OS === 'ios' ? 4 : 10 },
+  tabItem: { flex: 1, alignItems: 'center', gap: 3 },
+  tabGlyph: { width: 52, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center' },
+  tabLabel: { fontSize: 12, fontWeight: '800', color: C.muted },
+  tabBadge: { position: 'absolute', top: -2, left: '50%', marginLeft: 10, minWidth: 18, height: 18, borderRadius: 9, backgroundColor: C.orange, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 4 },
+  tabBadgeText: { color: '#fff', fontSize: 10.5, fontWeight: '800' },
+  calGlyph: { width: 18, height: 17, borderWidth: 2, borderRadius: 4, overflow: 'hidden' },
+  calGlyphTop: { height: 4 },
+  eventCard: { backgroundColor: C.card, borderWidth: 1, borderColor: C.line, borderRadius: 18, overflow: 'hidden' },
+  eventCardFeatured: { borderColor: C.amber, borderWidth: 2 },
+  eventCardImg: { width: '100%', height: 190 },
+  eventHero: { width: '100%', aspectRatio: 0.8 },
+  posterDiamond: { width: 16, height: 16, borderWidth: 2, borderColor: C.amber, transform: [{ rotate: '45deg' }], borderRadius: 2, marginBottom: 8 },
+  posterDay: { color: '#fff', fontSize: 44, fontWeight: '900' },
+  posterMonth: { color: C.amber, fontSize: 15, fontWeight: '800' },
 });
